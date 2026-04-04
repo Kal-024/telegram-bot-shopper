@@ -1,9 +1,12 @@
+import asyncio
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, CallbackQueryHandler
 from datetime import datetime
 import time
 import json
 import os
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,20 +15,25 @@ load_dotenv()
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@000000000')  # Reemplaza con tu canal o asegúrate de definirlo en .env
 
 # Lista de IDs de usuarios autorizados para crear y finalizar eventos (vendedores/admins)
-AUTHORIZED_USERS = [963819835]
+authorized_users_str = os.getenv('AUTHORIZED_USERS', '963819835')
+AUTHORIZED_USERS = [int(uid.strip()) for uid in authorized_users_str.split(',') if uid.strip()]
 
-# Mensaje de bienvenida
-WELCOME_MESSAGE = (
-    "*Hola Carelion 👋*\n\n"
-    "Soy Yaro, tu asistente virtual para gestionar eventos de MIO.\n\n"
-    "Comandos disponibles:\n"
-    "• /evento - Crear un nuevo evento\n"
-    "• /resumen - Ver tus reservas\n"
-    "• /fin - Finalizar un evento\n"
-    "• /consolidado - Ver el consolidado de un evento\n"
-    "• /historial - Consultar eventos finalizados\n"
-    "• /limpiar - Limpiar los mensajes de un evento\n"
-)
+# Nombre del bot y tienda
+STORE_NAME = os.getenv('STORE_NAME', 'MIO')
+
+# Mensaje de bienvenida (se genera dinámicamente)
+def get_welcome_message(username, bot_name):
+    return (
+        f"*Hola {username} 👋*\n\n"
+        f"Soy {bot_name}, tu asistente virtual para gestionar eventos de {STORE_NAME}.\n\n"
+        "Comandos disponibles:\n"
+        "• /evento - Crear un nuevo evento\n"
+        "• /resumen - Ver tus reservas\n"
+        "• /fin - Finalizar un evento\n"
+        "• /consolidado - Ver el consolidado de un evento\n"
+        "• /historial - Consultar eventos finalizados\n"
+        "• /limpiar - Limpiar los mensajes de un evento\n"
+    )
 
 # Archivo para persistir datos de eventos y clics
 DATA_FILE = 'bot_data.json'
@@ -68,7 +76,12 @@ def format_user_identifier(user_id, username):
     return f'@{user_id}'
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(WELCOME_MESSAGE)
+    username = update.effective_user.username or update.effective_user.full_name or 'Usuario'
+    bot_info = await context.bot.get_me()
+    bot_name = bot_info.first_name
+    welcome_message = get_welcome_message(username, bot_name)
+    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+
 
 async def event_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
@@ -486,6 +499,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.channel_post.text and update.channel_post.text.startswith('/start'):
         await context.bot.send_message(chat_id=update.channel_post.chat_id, text='Hello! I am your Telegram bot in this channel.')
+
+
 
 if __name__ == '__main__':
     application = ApplicationBuilder().token(BOT_TOKEN).build()
