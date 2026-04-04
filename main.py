@@ -9,10 +9,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ID del canal donde se enviarán los eventos (puede ser @username o ID numérico)
-CHANNEL_ID = os.getenv('CHANNEL_ID', '@mi0_sh0p')
+CHANNEL_ID = os.getenv('CHANNEL_ID', '@000000000')  # Reemplaza con tu canal o asegúrate de definirlo en .env
 
 # Lista de IDs de usuarios autorizados para crear y finalizar eventos (vendedores/admins)
 AUTHORIZED_USERS = [963819835]
+
+# Mensaje de bienvenida
+WELCOME_MESSAGE = (
+    "*Hola Carelion 👋*\n\n"
+    "Soy Yaro, tu asistente virtual para gestionar eventos de MIO.\n\n"
+    "Comandos disponibles:\n"
+    "• /evento - Crear un nuevo evento\n"
+    "• /resumen - Ver tus reservas\n"
+    "• /fin - Finalizar un evento\n"
+    "• /consolidado - Ver el consolidado de un evento\n"
+    "• /historial - Consultar eventos finalizados\n"
+    "• /limpiar - Limpiar los mensajes de un evento\n"
+)
 
 # Archivo para persistir datos de eventos y clics
 DATA_FILE = 'bot_data.json'
@@ -24,7 +37,7 @@ if not BOT_TOKEN:
 
 # Estados para la conversación
 WAITING_FOR_IMAGES, WAITING_FOR_IMAGE_DESC, WAITING_FOR_TITLE, WAITING_FOR_DATETIME = range(4)
-WAITING_FOR_EVENT_ID_RESUMEN, WAITING_FOR_EVENT_ID_FIN, WAITING_FOR_EVENT_ID_LIMPIAR = range(4, 7)
+WAITING_FOR_EVENT_ID_RESUMEN, WAITING_FOR_EVENT_ID_FIN, WAITING_FOR_EVENT_ID_LIMPIAR, WAITING_FOR_EVENT_ID_CONSOLIDADO = range(4, 8)
 
 def load_data(context):
     if os.path.exists(DATA_FILE):
@@ -36,8 +49,26 @@ def save_data(context):
     with open(DATA_FILE, 'w') as f:
         json.dump(dict(context.bot_data), f)
 
+
+def normalize_click(click):
+    if isinstance(click, dict):
+        return click.get('id'), click.get('username', '')
+    return click, ''
+
+
+def format_user_identifier(user_id, username):
+    if username:
+        if username.startswith('@'):
+            username_str = username
+        elif ' ' in username:
+            username_str = username
+        else:
+            username_str = f'@{username}'
+        return f'@{user_id} - {username_str}'
+    return f'@{user_id}'
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text('Hola Carelion, soy Yaro, tu asistente virtual para programar eventos de MIO.')
+    await update.message.reply_text(WELCOME_MESSAGE)
 
 async def event_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
@@ -249,7 +280,8 @@ async def handle_mio_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     # Reservar el producto
-    item['clicks'].append(user_id)
+    username = query.from_user.username or query.from_user.full_name or ''
+    item['clicks'].append({'id': user_id, 'username': username})
     save_data(context)
 
     # Editar el mensaje para remover el botón
@@ -291,7 +323,7 @@ async def receive_event_id_resumen(update: Update, context: ContextTypes.DEFAULT
     event = events[event_id]
     user_clicks = []
     for idx, item in enumerate(event['items']):
-        if user_id in item['clicks']:
+        if any(normalize_click(click)[0] == user_id for click in item['clicks']):
             user_clicks.append(f'{idx + 1}. {item["caption"]}')
 
     if not user_clicks:
@@ -319,15 +351,20 @@ async def receive_event_id_fin(update: Update, context: ContextTypes.DEFAULT_TYP
     event = events[event_id]
     user_reservations = {}
     for item in event['items']:
-        for user in item['clicks']:
-            if user not in user_reservations:
-                user_reservations[user] = []
-            user_reservations[user].append(item['caption'])
+        for click in item['clicks']:
+            uid, username = normalize_click(click)
+            if uid not in user_reservations:
+                user_reservations[uid] = {
+                    'username': username,
+                    'products': [],
+                }
+            user_reservations[uid]['products'].append(item['caption'])
 
     consolidado = f'*Consolidado del evento "{event["title"]}"*\n\n'
     if user_reservations:
-        for user, products in user_reservations.items():
-            consolidado += f'@{user}: {", ".join(products)}\n'
+        for uid, data in user_reservations.items():
+            user_label = format_user_identifier(uid, data['username'])
+            consolidado += f'{user_label}: {", ".join(data["products"])}\n'
     else:
         consolidado += 'No hay reservas.\n'
 
@@ -341,7 +378,70 @@ async def receive_event_id_fin(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception as e:
                 print(f"Error removing button for {item['caption']}: {e}")
 
+    # Marcar evento como finalizado
+    event['finalizado'] = True
+    save_data(context)
+
     return ConversationHandler.END
+
+async def consolidado_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    if user_id not in AUTHORIZED_USERS:
+        await update.message.reply_text('No tienes permisos para ver consolidado de eventos.')
+        return ConversationHandler.END
+    await update.message.reply_text('Envíame el identificador único del evento para obtener el consolidado.')
+    return WAITING_FOR_EVENT_ID_CONSOLIDADO
+
+async def receive_event_id_consolidado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    event_id = update.message.text.strip()
+    events = context.bot_data.get('events', {})
+    if event_id not in events:
+        await update.message.reply_text('Evento no encontrado.')
+        return ConversationHandler.END
+
+    event = events[event_id]
+    user_reservations = {}
+    for item in event['items']:
+        for click in item['clicks']:
+            uid, username = normalize_click(click)
+            if uid not in user_reservations:
+                user_reservations[uid] = {
+                    'username': username,
+                    'products': [],
+                }
+            user_reservations[uid]['products'].append(item['caption'])
+
+    consolidado = f'*Consolidado del evento "{event["title"]}"*\n\n'
+    if user_reservations:
+        for uid, data in user_reservations.items():
+            user_label = format_user_identifier(uid, data['username'])
+            consolidado += f'{user_label}: {", ".join(data["products"])}\n'
+    else:
+        consolidado += 'No hay reservas.\n'
+
+    await update.message.reply_text(consolidado, parse_mode='Markdown')
+
+    return ConversationHandler.END
+
+async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id not in AUTHORIZED_USERS:
+        await update.message.reply_text('No tienes permisos para ver el historial de eventos.')
+        return
+
+    events = context.bot_data.get('events', {})
+    finalizados = [event_id for event_id, event in events.items() if event.get('finalizado', False)]
+
+    if not finalizados:
+        await update.message.reply_text('No hay eventos finalizados.')
+        return
+
+    historial_text = '*Historial de eventos finalizados:*\n\n'
+    for event_id in finalizados:
+        event = events[event_id]
+        historial_text += f'ID: {event_id} - Título: {event["title"]}\n'
+
+    await update.message.reply_text(historial_text, parse_mode='Markdown')
 
 async def limpiar_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
@@ -396,7 +496,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('start', start))
     
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('event', event_start)],
+        entry_points=[CommandHandler('evento', event_start)],
         states={
             WAITING_FOR_IMAGES: [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), receive_images)],
             WAITING_FOR_IMAGE_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_image_desc)],
@@ -433,6 +533,17 @@ if __name__ == '__main__':
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     application.add_handler(limpiar_handler)
+    
+    consolidado_handler = ConversationHandler(
+        entry_points=[CommandHandler('consolidado', consolidado_start)],
+        states={
+            WAITING_FOR_EVENT_ID_CONSOLIDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_consolidado)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    application.add_handler(consolidado_handler)
+    
+    application.add_handler(CommandHandler('historial', historial))
     
     application.add_handler(CallbackQueryHandler(handle_mio_query, pattern=r'^(mio|next)\|'))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.TEXT, handle_channel_message))
