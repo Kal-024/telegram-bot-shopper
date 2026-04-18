@@ -1,12 +1,11 @@
-import asyncio
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, InputMediaPhoto, InputMediaVideo
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, CallbackQueryHandler
 from datetime import datetime
 import time
 import json
 import os
-import asyncio
+import logging
+import random
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,21 +21,27 @@ AUTHORIZED_USERS = [int(uid.strip()) for uid in authorized_users_str.split(',') 
 STORE_NAME = os.getenv('STORE_NAME', 'MIO')
 
 # Mensaje de bienvenida (se genera dinámicamente)
-def get_welcome_message(username, bot_name):
-    return (
+def get_welcome_message(username, bot_name, is_authorized):
+    base_msg = (
         f"*Hola {username} 👋*\n\n"
         f"Soy {bot_name}, tu asistente virtual para gestionar eventos de {STORE_NAME}.\n\n"
         "Comandos disponibles:\n"
-        "• /evento - Crear un nuevo evento\n"
-        "• /resumen - Ver tus reservas\n"
-        "• /fin - Finalizar un evento\n"
-        "• /consolidado - Ver el consolidado de un evento\n"
-        "• /historial - Consultar eventos finalizados\n"
-        "• /limpiar - Limpiar los mensajes de un evento\n"
     )
+    if is_authorized:
+        return base_msg + (
+            "• /evento - Crear un nuevo evento\n"
+            "• /resumen - Ver tus reservas\n"
+            "• /fin - Finalizar un evento\n"
+            "• /consolidado - Ver el consolidado de un evento\n"
+            "• /historial - Consultar eventos finalizados\n"
+            "• /limpiar - Limpiar los mensajes de un evento\n"
+        )
+    return base_msg + "• /resumen - Ver tus reservas en los eventos\n"
 
-# Archivo para persistir datos de eventos y clics
-DATA_FILE = 'bot_data.json'
+# Directorio y archivo para persistir datos de eventos y clics
+DATA_DIR = 'data'
+DATA_FILE = os.path.join(DATA_DIR, 'bot_data.json')
+LEGACY_DATA_FILE = '.bot_data.json'
 
 # Token del bot (manténlo seguro, no lo compartas)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -44,18 +49,56 @@ if not BOT_TOKEN:
     raise RuntimeError('BOT_TOKEN no está definido en .env')
 
 # Estados para la conversación
-WAITING_FOR_IMAGES, WAITING_FOR_IMAGE_DESC, WAITING_FOR_TITLE, WAITING_FOR_DATETIME = range(4)
-WAITING_FOR_EVENT_ID_RESUMEN, WAITING_FOR_EVENT_ID_FIN, WAITING_FOR_EVENT_ID_LIMPIAR, WAITING_FOR_EVENT_ID_CONSOLIDADO = range(4, 8)
+from enum import IntEnum
+
+class State(IntEnum):
+    WAITING_FOR_MEDIA = 0
+    WAITING_FOR_TITLE = 1
+    WAITING_FOR_DATETIME = 2
+    WAITING_FOR_EVENT_ID_RESUMEN = 3
+    WAITING_FOR_EVENT_ID_FIN = 4
+    WAITING_FOR_EVENT_ID_LIMPIAR = 5
+    WAITING_FOR_EVENT_ID_CONSOLIDADO = 6
+
 
 def load_data(context):
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
-            data = json.load(f)
-            context.update(data)
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+
+    if os.path.exists(LEGACY_DATA_FILE) and os.path.getsize(LEGACY_DATA_FILE) > 0:
+        try:
+            with open(LEGACY_DATA_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                context.update(data)
+        except (json.JSONDecodeError, IOError) as e:
+            logging.error(f'Error cargando datos de {LEGACY_DATA_FILE}: {e}')
+
+    if 'events' not in context:
+        context['events'] = {}
+
+    if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                events = context['events']
+                if 'events' in data:
+                    events.update(data['events'])
+                context.update(data)
+                context['events'] = events
+        except (json.JSONDecodeError, IOError) as e:
+            logging.error(f'Error cargando datos de {DATA_FILE}: {e}')
+
 
 def save_data(context):
-    with open(DATA_FILE, 'w') as f:
-        json.dump(dict(context.bot_data), f)
+    try:
+        if not os.path.exists(DATA_DIR):
+            os.makedirs(DATA_DIR)
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(dict(context.bot_data), f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        logging.error(f'Error guardando datos en {DATA_FILE}: {e}')
 
 
 def normalize_click(click):
@@ -75,11 +118,34 @@ def format_user_identifier(user_id, username):
         return f'@{user_id} - {username_str}'
     return f'@{user_id}'
 
+def get_consolidado_text(event: dict) -> str:
+    user_reservations = {}
+    for item in event.get('items', []):
+        for click in item.get('clicks', []):
+            uid, username = normalize_click(click)
+            if uid not in user_reservations:
+                user_reservations[uid] = {
+                    'username': username,
+                    'products': [],
+                }
+            user_reservations[uid]['products'].append(item['caption'])
+
+    consolidado = f'*Consolidado del evento "{event.get("title", "")}"*\n\n'
+    if user_reservations:
+        for uid, data in user_reservations.items():
+            user_label = format_user_identifier(uid, data['username'])
+            consolidado += f'{user_label}: {", ".join(data["products"])}\n'
+    else:
+        consolidado += 'No hay reservas.\n'
+    return consolidado
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.full_name or 'Usuario'
     bot_info = await context.bot.get_me()
     bot_name = bot_info.first_name
-    welcome_message = get_welcome_message(username, bot_name)
+    is_authorized = user_id in AUTHORIZED_USERS
+    welcome_message = get_welcome_message(username, bot_name, is_authorized)
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
 
@@ -89,54 +155,61 @@ async def event_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text('No tienes permisos para crear eventos. Solo vendedores/admins pueden usar este comando.')
         return ConversationHandler.END
     await update.message.reply_text(
-        'Envíame las imágenes de los productos para el evento. Después de cada imagen, escribe una breve descripción con el costo. Cuando termines, escribe "listo".'
+        'Envíame una o varias fotos/videos para el producto. Cuando termines con las imágenes de este producto, escribe su descripción (y costo) para guardarlo. Para finalizar y armar el evento, envía "listo".'
     )
     context.user_data['items'] = []
-    context.user_data['pending_photo'] = None
-    return WAITING_FOR_IMAGES
+    context.user_data['current_media'] = []
+    return State.WAITING_FOR_MEDIA
 
-async def receive_images(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        context.user_data['pending_photo'] = file_id
-        await update.message.reply_text(
-            'Imagen recibida. Ahora envía una breve descripción para este producto (por ejemplo: "Camiseta negra - $20").'
-        )
-        return WAITING_FOR_IMAGE_DESC
+async def receive_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # 1. Recibir Media
+    if update.message.photo or update.message.video:
+        media_list = context.user_data.setdefault('current_media', [])
+        if update.message.photo:
+            media_list.append({'type': 'photo', 'file_id': update.message.photo[-1].file_id})
+        elif update.message.video:
+            media_list.append({'type': 'video', 'file_id': update.message.video.file_id})
+            
+        if len(media_list) == 1:
+            await update.message.reply_text('📷 Recibido. Puedes seguir enviando más fotos/videos para AGREGARLOS al mismo producto, o envía la DESCRIPCIÓN en texto (ej. "Zapatos - $10") para guardarlo.')
+        return State.WAITING_FOR_MEDIA
 
-    if update.message.text and update.message.text.lower() == 'listo':
-        if context.user_data.get('pending_photo'):
-            await update.message.reply_text('Debes enviar la descripción de la última imagen antes de terminar.')
-            return WAITING_FOR_IMAGE_DESC
-        if not context.user_data['items']:
-            await update.message.reply_text('No has enviado productos. Envía al menos una imagen con su descripción.')
-            return WAITING_FOR_IMAGES
-        await update.message.reply_text('Ahora, envíame el título del evento.')
-        return WAITING_FOR_TITLE
+    # 2. Recibir Texto (Descripción o "listo")
+    if update.message.text:
+        text = update.message.text.strip()
+        if text.lower() == 'listo':
+            if context.user_data.get('current_media'):
+                await update.message.reply_text('Tienes fotos/videos pendientes. Escribe la descripción para el último producto antes de terminar o envía más imágenes.')
+                return State.WAITING_FOR_MEDIA
+            if not context.user_data.get('items'):
+                await update.message.reply_text('No has enviado productos. Envía al menos una foto/video seguida de su descripción.')
+                return State.WAITING_FOR_MEDIA
+                
+            await update.message.reply_text('Ahora, envíame el título para todo evento.')
+            return State.WAITING_FOR_TITLE
+            
+        else: # Text is a DESCRIPTION
+            if not context.user_data.get('current_media'):
+                await update.message.reply_text('Primero debes enviar fotos o videos antes de escribir una descripción.')
+                return State.WAITING_FOR_MEDIA
+                
+            # Guardamos el producto con su álbum
+            context.user_data['items'].append({
+                'media': context.user_data['current_media'],
+                'caption': text
+            })
+            items_count = len(context.user_data['items'])
+            context.user_data['current_media'] = []
+            await update.message.reply_text(f'✅ ¡Producto {items_count} guardado con éxito! Envía imágenes para el SIGUIENTE producto o escribe "listo" para terminar.')
+            return State.WAITING_FOR_MEDIA
 
-    await update.message.reply_text('Por favor, envía una imagen o escribe "listo".')
-    return WAITING_FOR_IMAGES
-
-async def receive_image_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    caption = update.message.text
-    if not caption:
-        await update.message.reply_text('Escribe una descripción breve para el producto.')
-        return WAITING_FOR_IMAGE_DESC
-
-    photo_id = context.user_data.get('pending_photo')
-    if not photo_id:
-        await update.message.reply_text('No hay imagen pendiente. Envía primero una imagen.')
-        return WAITING_FOR_IMAGES
-
-    context.user_data['items'].append({'photo': photo_id, 'caption': caption})
-    context.user_data['pending_photo'] = None
-    await update.message.reply_text('Producto guardado. Envía otra imagen o escribe "listo" para continuar.')
-    return WAITING_FOR_IMAGES
+    await update.message.reply_text('Por favor, envía una foto, video o escribe "listo".')
+    return State.WAITING_FOR_MEDIA
 
 async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['title'] = update.message.text
     await update.message.reply_text('Ahora, envíame la fecha y hora del evento en formato DD/MM/YYYY HH:MM (ej. 15/04/2026 14:30).')
-    return WAITING_FOR_DATETIME
+    return State.WAITING_FOR_DATETIME
 
 async def receive_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
@@ -144,18 +217,70 @@ async def receive_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         now = datetime.now()
         if event_datetime <= now:
             await update.message.reply_text('La fecha debe ser en el futuro. Intenta de nuevo.')
-            return WAITING_FOR_DATETIME
+            return State.WAITING_FOR_DATETIME
         context.user_data['event_datetime'] = event_datetime
-        event_id = str(int(time.time()))
-        context.user_data['event_id'] = event_id
-        context.user_data['creator'] = update.effective_user.id
+        
+        while True:
+            event_id = str(random.randint(1000, 9999))
+            if event_id not in context.bot_data.get('events', {}):
+                break
+                
+        event_data = {
+            'title': context.user_data['title'],
+            'items': [item.copy() for item in context.user_data['items']],
+            'event_id': event_id,
+            'creator': update.effective_user.id,
+            'event_datetime': update.message.text,
+        }
         delay = (event_datetime - datetime.now()).total_seconds()
-        context.job_queue.run_once(send_event, delay, data=context.user_data)
-        await update.message.reply_text(f'Evento programado. Se enviará al canal en la fecha indicada. ID del evento: {event_id}')
+        context.job_queue.run_once(send_event, delay, data=event_data)
+        await update.message.reply_text(f'Evento programado. Se enviará al canal en la fecha indicada. ID del evento: *{event_id}*', parse_mode='Markdown')
         return ConversationHandler.END
     except ValueError:
         await update.message.reply_text('Formato inválido. Usa DD/MM/YYYY HH:MM.')
-        return WAITING_FOR_DATETIME
+        return State.WAITING_FOR_DATETIME
+
+
+async def _send_product_to_channel(context: ContextTypes.DEFAULT_TYPE, item: dict, event_id: str, idx: int, total_items: int) -> bool:
+    media = item.get('media', [])
+    # Compatibilidad hacia atrás: si `photo` existe en lugar de `media` (eventos viejos)
+    if not media and item.get('photo'):
+        media = [{'type': 'photo', 'file_id': item['photo']}]
+        
+    caption = f"{item['caption']}\n({idx+1} de {total_items})"
+    channel_buttons = [InlineKeyboardButton('Mio', callback_data=f'mio|{event_id}|{idx}')]
+    message_ids = []
+    
+    try:
+        if len(media) == 1:
+            m = media[0]
+            if m['type'] == 'photo':
+                msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=m['file_id'], caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+            else:
+                msg = await context.bot.send_video(chat_id=CHANNEL_ID, video=m['file_id'], caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+            message_ids.append(msg.message_id)
+        else:
+            input_media = []
+            for m in media:
+                if m['type'] == 'photo':
+                    input_media.append(InputMediaPhoto(m['file_id']))
+                else:
+                    input_media.append(InputMediaVideo(m['file_id']))
+            # Enviar grupo
+            msgs = await context.bot.send_media_group(chat_id=CHANNEL_ID, media=input_media)
+            for gm in msgs:
+                message_ids.append(gm.message_id)
+            # Enviar mensaje con botón e información
+            btn_msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=f"📌 {caption}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+            message_ids.append(btn_msg.message_id)
+            
+        item['message_ids'] = message_ids
+        save_data(context)
+        return True
+    except Exception as e:
+        logging.error(f"Error enviando producto a canal: {e}")
+        return False
+
 
 async def send_event(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
@@ -169,7 +294,8 @@ async def send_event(context: ContextTypes.DEFAULT_TYPE) -> None:
     events[event_id] = {
         'title': title,
         'creator': creator,
-        'items': [{'caption': item['caption'], 'photo': item['photo'], 'clicks': [], 'message_id': None} for item in items],
+        'event_datetime': data.get('event_datetime', ''),
+        'items': [{'caption': item['caption'], 'media': item.get('media', [{'type': 'photo', 'file_id': item.get('photo')}]), 'clicks': [], 'message_ids': []} for item in items],
         'title_message_id': None
     }
     save_data(context)
@@ -179,116 +305,85 @@ async def send_event(context: ContextTypes.DEFAULT_TYPE) -> None:
         events[event_id]['title_message_id'] = message.message_id
         save_data(context)
     except Exception as e:
-        print(f"Error sending event title: {e}")
+        logging.error(f"Error sending event title: {e}")
         return
 
-    if items:
+    if len(items) > 0:
         idx = 0
-        item = items[idx]
-        caption = f"{item['caption']}\n({idx+1} de {len(items)})"
-        try:
-            message = await context.bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=item['photo'],
-                caption=caption,
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Mio', callback_data=f'mio|{event_id}|{idx}')]]),
-            )
-            events[event_id]['items'][idx]['message_id'] = message.message_id
-            save_data(context)
-        except Exception as e:
-            print(f"Error sending first product: {e}")
+        db_item = events[event_id]['items'][idx]
+        success = await _send_product_to_channel(context, db_item, event_id, idx, len(items))
+        if not success:
             return
 
         # Enviar control privado al creador
         if len(items) > 1:
             try:
+                next_item = items[1]
                 await context.bot.send_message(
                     chat_id=creator,
-                    text=f'Control del evento "{title}": Presiona Siguiente para enviar el próximo producto.',
+                    text=f'Control del evento "{title}"\nPróximo producto: *{next_item["caption"]}*\n\nPresiona Siguiente para enviar este producto al canal.',
+                    parse_mode='Markdown',
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Siguiente', callback_data=f'next|{event_id}|{idx}')]]),
                 )
             except Exception as e:
-                print(f"Error sending control to creator: {e}")
-    events = context.bot_data.get('events', {})
-    if event_id not in events or idx >= len(events[event_id]['items']):
-        await query.answer(text='Producto no encontrado.', show_alert=True)
-        return
+                logging.error(f"Error sending control to creator: {e}")
 
-async def handle_mio_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query  # type: CallbackQuery
-    if not query:
-        return
-
-    await query.answer()
-    if not query.data or not query.data.startswith(('mio|', 'next|')):
-        return
-
-    if query.data.startswith('next|'):
-        _, event_id, idx_text = query.data.split('|', 2)
-        current_idx = int(idx_text)
-        user_id = query.from_user.id
-
-        events = context.bot_data.get('events', {})
-        if event_id not in events:
-            await query.answer(text='Evento no encontrado.', show_alert=True)
-            return
-
-        if user_id != events[event_id]['creator']:
-            await query.answer('Solo el creador puede avanzar al siguiente producto.', show_alert=True)
-            return
-
-        next_idx = current_idx + 1
-        if next_idx >= len(events[event_id]['items']):
-            await query.answer('No hay más productos.', show_alert=True)
-            return
-
-        item = events[event_id]['items'][next_idx]
-        caption = f"{item['caption']}\n({next_idx+1} de {len(events[event_id]['items'])})"
-        buttons = []
-        if next_idx + 1 < len(events[event_id]['items']):
-            buttons.append(InlineKeyboardButton('Siguiente', callback_data=f'next|{event_id}|{next_idx}'))
-        buttons.append(InlineKeyboardButton('Mio', callback_data=f'mio|{event_id}|{next_idx}'))
-
-        try:
-            message = await context.bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=item['photo'],
-                caption=caption,
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Mio', callback_data=f'mio|{event_id}|{next_idx}')]]),
-            )
-            events[event_id]['items'][next_idx]['message_id'] = message.message_id
-            save_data(context)
-            await query.answer('Producto siguiente enviado.', show_alert=False)
-
-            # Enviar control privado si hay más
-            if next_idx + 1 < len(events[event_id]['items']):
-                try:
-                    await context.bot.send_message(
-                        chat_id=events[event_id]['creator'],
-                        text=f'Control del evento "{events[event_id]["title"]}": Presiona Siguiente para enviar el próximo producto.',
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Siguiente', callback_data=f'next|{event_id}|{next_idx}')]]),
-                    )
-                except Exception as e:
-                    print(f"Error sending control to creator: {e}")
-        except Exception as e:
-            print(f"Error sending next product: {e}")
-            await query.answer('Error al enviar el producto.', show_alert=True)
-        return
-
-    # Handle 'mio|'
-    _, event_id, idx_text = query.data.split('|', 2)
-    idx = int(idx_text)
+async def _process_next_product(query, event_id: str, current_idx: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = query.from_user.id
-
     events = context.bot_data.get('events', {})
+    if event_id not in events:
+        await query.answer(text='Evento no encontrado.', show_alert=True)
+        return
+
+    if user_id != events[event_id].get('creator'):
+        await query.answer('Solo el creador puede avanzar al siguiente producto.', show_alert=True)
+        return
+
+    next_idx = current_idx + 1
+    if next_idx >= len(events[event_id]['items']):
+        await query.answer('No hay más productos.', show_alert=True)
+        return
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    db_item = events[event_id]['items'][next_idx]
+    
+    success = await _send_product_to_channel(context, db_item, event_id, next_idx, len(events[event_id]['items']))
+    if not success:
+        await query.answer('Error al enviar el producto.', show_alert=True)
+        return
+        
+    try:
+        await query.answer('Producto siguiente enviado.', show_alert=False)
+    except Exception:
+        pass
+
+    # Enviar control privado si hay más
+    if next_idx + 1 < len(events[event_id]['items']):
+        try:
+            next_item = events[event_id]['items'][next_idx + 1]
+            await context.bot.send_message(
+                chat_id=events[event_id]['creator'],
+                text=f'Control del evento "{events[event_id]["title"]}"\nPróximo producto: *{next_item["caption"]}*\n\nPresiona Siguiente para enviar este producto al canal.',
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Siguiente', callback_data=f'next|{event_id}|{next_idx}')]]),
+            )
+        except Exception as e:
+            logging.error(f"Error sending control to creator: {e}")
+
+async def _process_reserve_product(query, event_id: str, idx: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = query.from_user.id
+    events = context.bot_data.get('events', {})
+    
     if event_id not in events or idx >= len(events[event_id]['items']):
         await query.answer(text='Producto no encontrado.', show_alert=True)
         return
 
     item = events[event_id]['items'][idx]
-    if item['clicks']:
+    if item.get('clicks'):
         await query.answer(text='Este producto ya fue reservado por otro usuario.', show_alert=True)
         return
 
@@ -297,17 +392,21 @@ async def handle_mio_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     item['clicks'].append({'id': user_id, 'username': username})
     save_data(context)
 
-    # Editar el mensaje para remover el botón
-    message_id = item.get('message_id')
-    if message_id:
+    # Editar el mensaje para remover el botón (siempre el último msg_id de la lista de producto)
+    if 'message_id' in item and item['message_id']:
+        item['message_ids'] = [item['message_id']]
+        del item['message_id']
+        
+    if item.get('message_ids'):
+        last_msg_id = item['message_ids'][-1]
         try:
             await context.bot.edit_message_reply_markup(
                 chat_id=CHANNEL_ID,
-                message_id=message_id,
+                message_id=last_msg_id,
                 reply_markup=None
             )
-        except Exception:
-            pass  # Ignorar errores si no se puede editar
+        except Exception as e:
+            logging.warning(f"No se pudo limpiar los botones de evento {event_id} msj {last_msg_id}: {e}")
 
     summary = (
         f'*Resumen del producto*\n'
@@ -318,12 +417,32 @@ async def handle_mio_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         await context.bot.send_message(chat_id=user_id, text=summary, parse_mode='Markdown')
         await query.answer(text='Producto reservado. Te envié el resumen en privado.', show_alert=False)
-    except Exception:
+    except Exception as e:
+        logging.warning(f"No se pudo enviar mensaje final al usuario {user_id}: {e}")
         await query.answer(text='Producto reservado, pero no pude enviarte el mensaje privado. Inicia el bot con /start primero.', show_alert=True)
+
+async def handle_mio_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    await query.answer()
+
+    try:
+        if query.data.startswith('next|'):
+            _, event_id, idx_text = query.data.split('|', 2)
+            await _process_next_product(query, event_id, int(idx_text), context)
+            
+        elif query.data.startswith('mio|'):
+            _, event_id, idx_text = query.data.split('|', 2)
+            await _process_reserve_product(query, event_id, int(idx_text), context)
+    except ValueError as e:
+        logging.error(f"Error al procesar los datos del botón: {query.data} -> {e}")
+        await query.answer(text="Datos corruptos u operación inválida.", show_alert=True)
 
 async def resumen_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text('Envíame el identificador único del evento para obtener tu resumen de productos.')
-    return WAITING_FOR_EVENT_ID_RESUMEN
+    return State.WAITING_FOR_EVENT_ID_RESUMEN
 
 async def receive_event_id_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     event_id = update.message.text.strip()
@@ -352,7 +471,7 @@ async def fin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text('No tienes permisos para finalizar eventos.')
         return ConversationHandler.END
     await update.message.reply_text('Envíame el identificador único del evento para finalizarlo y obtener el consolidado.')
-    return WAITING_FOR_EVENT_ID_FIN
+    return State.WAITING_FOR_EVENT_ID_FIN
 
 async def receive_event_id_fin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     event_id = update.message.text.strip()
@@ -362,34 +481,22 @@ async def receive_event_id_fin(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     event = events[event_id]
-    user_reservations = {}
-    for item in event['items']:
-        for click in item['clicks']:
-            uid, username = normalize_click(click)
-            if uid not in user_reservations:
-                user_reservations[uid] = {
-                    'username': username,
-                    'products': [],
-                }
-            user_reservations[uid]['products'].append(item['caption'])
-
-    consolidado = f'*Consolidado del evento "{event["title"]}"*\n\n'
-    if user_reservations:
-        for uid, data in user_reservations.items():
-            user_label = format_user_identifier(uid, data['username'])
-            consolidado += f'{user_label}: {", ".join(data["products"])}\n'
-    else:
-        consolidado += 'No hay reservas.\n'
+    consolidado = get_consolidado_text(event)
 
     await update.message.reply_text(consolidado, parse_mode='Markdown')
 
     # Eliminar botones de productos no reservados
     for item in event['items']:
-        if not item['clicks'] and item['message_id']:
-            try:
-                await context.bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=item['message_id'], reply_markup=None)
-            except Exception as e:
-                print(f"Error removing button for {item['caption']}: {e}")
+        if not item['clicks']:
+            if 'message_id' in item and item['message_id']:
+                item['message_ids'] = [item['message_id']]
+                del item['message_id']
+            if item.get('message_ids'):
+                last_msg_id = item['message_ids'][-1]
+                try:
+                    await context.bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=last_msg_id, reply_markup=None)
+                except Exception as e:
+                    logging.error(f"Error removing button for {item['caption']}: {e}")
 
     # Marcar evento como finalizado
     event['finalizado'] = True
@@ -403,7 +510,7 @@ async def consolidado_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text('No tienes permisos para ver consolidado de eventos.')
         return ConversationHandler.END
     await update.message.reply_text('Envíame el identificador único del evento para obtener el consolidado.')
-    return WAITING_FOR_EVENT_ID_CONSOLIDADO
+    return State.WAITING_FOR_EVENT_ID_CONSOLIDADO
 
 async def receive_event_id_consolidado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     event_id = update.message.text.strip()
@@ -413,24 +520,7 @@ async def receive_event_id_consolidado(update: Update, context: ContextTypes.DEF
         return ConversationHandler.END
 
     event = events[event_id]
-    user_reservations = {}
-    for item in event['items']:
-        for click in item['clicks']:
-            uid, username = normalize_click(click)
-            if uid not in user_reservations:
-                user_reservations[uid] = {
-                    'username': username,
-                    'products': [],
-                }
-            user_reservations[uid]['products'].append(item['caption'])
-
-    consolidado = f'*Consolidado del evento "{event["title"]}"*\n\n'
-    if user_reservations:
-        for uid, data in user_reservations.items():
-            user_label = format_user_identifier(uid, data['username'])
-            consolidado += f'{user_label}: {", ".join(data["products"])}\n'
-    else:
-        consolidado += 'No hay reservas.\n'
+    consolidado = get_consolidado_text(event)
 
     await update.message.reply_text(consolidado, parse_mode='Markdown')
 
@@ -452,7 +542,8 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     historial_text = '*Historial de eventos finalizados:*\n\n'
     for event_id in finalizados:
         event = events[event_id]
-        historial_text += f'ID: {event_id} - Título: {event["title"]}\n'
+        date_info = f" - *Fecha/Hora:* {event['event_datetime']}" if event.get('event_datetime') else ""
+        historial_text += f'*ID:* {event_id} - *Título:* {event["title"]}{date_info}\n'
 
     await update.message.reply_text(historial_text, parse_mode='Markdown')
 
@@ -462,7 +553,7 @@ async def limpiar_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text('No tienes permisos para limpiar eventos.')
         return ConversationHandler.END
     await update.message.reply_text('Envíame el identificador único del evento para limpiar todos sus mensajes en el canal.')
-    return WAITING_FOR_EVENT_ID_LIMPIAR
+    return State.WAITING_FOR_EVENT_ID_LIMPIAR
 
 async def receive_event_id_limpiar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     event_id = update.message.text.strip()
@@ -477,19 +568,21 @@ async def receive_event_id_limpiar(update: Update, context: ContextTypes.DEFAULT
         try:
             await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=event['title_message_id'])
         except Exception as e:
-            print(f"Error deleting title: {e}")
+            logging.error(f"Error deleting title: {e}")
 
-    # Borrar productos
-    for item in event['items']:
-        if item['message_id']:
+    # Borrar productos (todos sus mensajes en album)
+    for item in event.get('items', []):
+        if 'message_id' in item and item['message_id']:
+            item['message_ids'] = [item['message_id']]
+            del item['message_id']
+            
+        for msg_id in item.get('message_ids', []):
             try:
-                await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=item['message_id'])
+                await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
             except Exception as e:
-                print(f"Error deleting product {item['caption']}: {e}")
+                logging.error(f"Error deleting media part of product {item['caption']}: {e}")
 
     await update.message.reply_text('Mensajes del evento limpiados.')
-    return ConversationHandler.END
-    # save_data(context)
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -513,10 +606,9 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('evento', event_start)],
         states={
-            WAITING_FOR_IMAGES: [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), receive_images)],
-            WAITING_FOR_IMAGE_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_image_desc)],
-            WAITING_FOR_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_title)],
-            WAITING_FOR_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_datetime)],
+            State.WAITING_FOR_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | (filters.TEXT & ~filters.COMMAND), receive_media)],
+            State.WAITING_FOR_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_title)],
+            State.WAITING_FOR_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_datetime)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
@@ -525,7 +617,7 @@ if __name__ == '__main__':
     resumen_handler = ConversationHandler(
         entry_points=[CommandHandler('resumen', resumen_start)],
         states={
-            WAITING_FOR_EVENT_ID_RESUMEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_resumen)],
+            State.WAITING_FOR_EVENT_ID_RESUMEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_resumen)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
@@ -534,7 +626,7 @@ if __name__ == '__main__':
     fin_handler = ConversationHandler(
         entry_points=[CommandHandler('fin', fin_start)],
         states={
-            WAITING_FOR_EVENT_ID_FIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_fin)],
+            State.WAITING_FOR_EVENT_ID_FIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_fin)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
@@ -543,7 +635,7 @@ if __name__ == '__main__':
     limpiar_handler = ConversationHandler(
         entry_points=[CommandHandler('limpiar', limpiar_start)],
         states={
-            WAITING_FOR_EVENT_ID_LIMPIAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_limpiar)],
+            State.WAITING_FOR_EVENT_ID_LIMPIAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_limpiar)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
@@ -552,7 +644,7 @@ if __name__ == '__main__':
     consolidado_handler = ConversationHandler(
         entry_points=[CommandHandler('consolidado', consolidado_start)],
         states={
-            WAITING_FOR_EVENT_ID_CONSOLIDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_consolidado)],
+            State.WAITING_FOR_EVENT_ID_CONSOLIDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_consolidado)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
