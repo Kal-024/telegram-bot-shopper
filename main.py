@@ -7,24 +7,36 @@ import os
 import logging
 import random
 from dotenv import load_dotenv
+from enum import IntEnum
 
 load_dotenv()
 
-# ID del canal donde se enviarán los eventos (puede ser @username o ID numérico)
-CHANNEL_ID = os.getenv('CHANNEL_ID', '@000000000')  # Reemplaza con tu canal o asegúrate de definirlo en .env
 
-# Lista de IDs de usuarios autorizados para crear y finalizar eventos (vendedores/admins)
-authorized_users_str = os.getenv('AUTHORIZED_USERS', '963819835')
-AUTHORIZED_USERS = [int(uid.strip()) for uid in authorized_users_str.split(',') if uid.strip()]
+# ─── Estados para la conversación ─────────────────────────────────────────
 
-# Nombre del bot y tienda
-STORE_NAME = os.getenv('STORE_NAME', 'MIO')
+class State(IntEnum):
+    WAITING_FOR_MEDIA = 0
+    WAITING_FOR_TITLE = 1
+    WAITING_FOR_DATETIME = 2
+    WAITING_FOR_EVENT_ID_RESUMEN = 3
+    WAITING_FOR_EVENT_ID_FIN = 4
+    WAITING_FOR_EVENT_ID_LIMPIAR = 5
+    WAITING_FOR_EVENT_ID_CONSOLIDADO = 6
+
+
+# ─── Helpers de configuración ─────────────────────────────────────────────
+
+def get_config(context):
+    """Obtiene la configuración de la empresa desde bot_data.
+    Cada instancia de ShopperBot almacena su propia config aquí."""
+    return context.bot_data.get('config', {})
+
 
 # Mensaje de bienvenida (se genera dinámicamente)
-def get_welcome_message(username, bot_name, is_authorized):
+def get_welcome_message(username, bot_name, is_authorized, store_name):
     base_msg = (
         f"*Hola {username} 👋*\n\n"
-        f"Soy {bot_name}, tu asistente virtual para gestionar eventos de {STORE_NAME}.\n\n"
+        f"Soy {bot_name}, tu asistente virtual para gestionar eventos de {store_name}.\n\n"
         "Comandos disponibles:\n"
     )
     if is_authorized:
@@ -38,68 +50,71 @@ def get_welcome_message(username, bot_name, is_authorized):
         )
     return base_msg + "• /resumen - Ver tus reservas en los eventos\n"
 
-# Directorio y archivo para persistir datos de eventos y clics
-DATA_DIR = 'data'
-DATA_FILE = os.path.join(DATA_DIR, 'bot_data.json')
-LEGACY_DATA_FILE = '.bot_data.json'
 
-# Token del bot (manténlo seguro, no lo compartas)
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-if not BOT_TOKEN:
-    raise RuntimeError('BOT_TOKEN no está definido en .env')
+# ─── Persistencia ─────────────────────────────────────────────────────────
 
-# Estados para la conversación
-from enum import IntEnum
+def load_data(bot_data, data_dir, data_file, legacy_file=None):
+    """Carga datos persistentes desde disco.
 
-class State(IntEnum):
-    WAITING_FOR_MEDIA = 0
-    WAITING_FOR_TITLE = 1
-    WAITING_FOR_DATETIME = 2
-    WAITING_FOR_EVENT_ID_RESUMEN = 3
-    WAITING_FOR_EVENT_ID_FIN = 4
-    WAITING_FOR_EVENT_ID_LIMPIAR = 5
-    WAITING_FOR_EVENT_ID_CONSOLIDADO = 6
+    Args:
+        bot_data: Diccionario de bot_data de la Application.
+        data_dir: Directorio donde viven los datos de esta empresa.
+        data_file: Ruta completa al archivo JSON de datos.
+        legacy_file: Ruta opcional a un archivo legacy (.bot_data.json) para migración.
+    """
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
 
+    # Preservar config si ya fue seteada (para que bot_data.update no la borre)
+    config_backup = bot_data.get('config')
 
-def load_data(context):
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR)
-
-    if os.path.exists(LEGACY_DATA_FILE) and os.path.getsize(LEGACY_DATA_FILE) > 0:
+    if legacy_file and os.path.exists(legacy_file) and os.path.getsize(legacy_file) > 0:
         try:
-            with open(LEGACY_DATA_FILE, 'r', encoding='utf-8') as f:
+            with open(legacy_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                context.update(data)
+                bot_data.update(data)
         except (json.JSONDecodeError, IOError) as e:
-            logging.error(f'Error cargando datos de {LEGACY_DATA_FILE}: {e}')
+            logging.error(f'Error cargando datos de {legacy_file}: {e}')
 
-    if 'events' not in context:
-        context['events'] = {}
+    if 'events' not in bot_data:
+        bot_data['events'] = {}
 
-    if os.path.exists(DATA_FILE) and os.path.getsize(DATA_FILE) > 0:
+    if os.path.exists(data_file) and os.path.getsize(data_file) > 0:
         try:
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            with open(data_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                events = context['events']
+                events = bot_data['events']
                 if 'events' in data:
                     events.update(data['events'])
-                context.update(data)
-                context['events'] = events
+                bot_data.update(data)
+                bot_data['events'] = events
         except (json.JSONDecodeError, IOError) as e:
-            logging.error(f'Error cargando datos de {DATA_FILE}: {e}')
+            logging.error(f'Error cargando datos de {data_file}: {e}')
+
+    # Restaurar config
+    if config_backup:
+        bot_data['config'] = config_backup
 
 
 def save_data(context):
+    """Guarda datos persistentes a disco, leyendo la ruta desde la config."""
+    config = get_config(context)
+    data_dir = config.get('data_dir', 'data')
+    data_file = config.get('data_file', os.path.join(data_dir, 'bot_data.json'))
     try:
-        if not os.path.exists(DATA_DIR):
-            os.makedirs(DATA_DIR)
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(dict(context.bot_data), f, ensure_ascii=False, indent=2)
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+        # Filtrar 'config' para no guardarlo en el JSON de datos
+        data_to_save = {k: v for k, v in context.bot_data.items() if k != 'config'}
+        with open(data_file, 'w', encoding='utf-8') as f:
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     except IOError as e:
-        logging.error(f'Error guardando datos en {DATA_FILE}: {e}')
+        logging.error(f'Error guardando datos en {data_file}: {e}')
 
+
+# ─── Utilidades ───────────────────────────────────────────────────────────
 
 def normalize_click(click):
     if isinstance(click, dict):
@@ -139,19 +154,24 @@ def get_consolidado_text(event: dict) -> str:
         consolidado += 'No hay reservas.\n'
     return consolidado
 
+
+# ─── Handlers ─────────────────────────────────────────────────────────────
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config = get_config(context)
     user_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.full_name or 'Usuario'
     bot_info = await context.bot.get_me()
     bot_name = bot_info.first_name
-    is_authorized = user_id in AUTHORIZED_USERS
-    welcome_message = get_welcome_message(username, bot_name, is_authorized)
+    is_authorized = user_id in config.get('authorized_users', [])
+    welcome_message = get_welcome_message(username, bot_name, is_authorized, config.get('store_name', 'MIO'))
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
 
 async def event_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    config = get_config(context)
     user_id = update.effective_user.id
-    if user_id not in AUTHORIZED_USERS:
+    if user_id not in config.get('authorized_users', []):
         await update.message.reply_text('No tienes permisos para crear eventos. Solo vendedores/admins pueden usar este comando.')
         return ConversationHandler.END
     await update.message.reply_text(
@@ -242,6 +262,9 @@ async def receive_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def _send_product_to_channel(context: ContextTypes.DEFAULT_TYPE, item: dict, event_id: str, idx: int, total_items: int) -> bool:
+    config = get_config(context)
+    channel_id = config['channel_id']
+
     media = item.get('media', [])
     # Compatibilidad hacia atrás: si `photo` existe en lugar de `media` (eventos viejos)
     if not media and item.get('photo'):
@@ -255,9 +278,9 @@ async def _send_product_to_channel(context: ContextTypes.DEFAULT_TYPE, item: dic
         if len(media) == 1:
             m = media[0]
             if m['type'] == 'photo':
-                msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=m['file_id'], caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+                msg = await context.bot.send_photo(chat_id=channel_id, photo=m['file_id'], caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
             else:
-                msg = await context.bot.send_video(chat_id=CHANNEL_ID, video=m['file_id'], caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+                msg = await context.bot.send_video(chat_id=channel_id, video=m['file_id'], caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
             message_ids.append(msg.message_id)
         else:
             input_media = []
@@ -267,11 +290,11 @@ async def _send_product_to_channel(context: ContextTypes.DEFAULT_TYPE, item: dic
                 else:
                     input_media.append(InputMediaVideo(m['file_id']))
             # Enviar grupo
-            msgs = await context.bot.send_media_group(chat_id=CHANNEL_ID, media=input_media)
+            msgs = await context.bot.send_media_group(chat_id=channel_id, media=input_media)
             for gm in msgs:
                 message_ids.append(gm.message_id)
             # Enviar mensaje con botón e información
-            btn_msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=f"📌 {caption}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+            btn_msg = await context.bot.send_message(chat_id=channel_id, text=f"📌 {caption}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
             message_ids.append(btn_msg.message_id)
             
         item['message_ids'] = message_ids
@@ -283,6 +306,9 @@ async def _send_product_to_channel(context: ContextTypes.DEFAULT_TYPE, item: dic
 
 
 async def send_event(context: ContextTypes.DEFAULT_TYPE) -> None:
+    config = get_config(context)
+    channel_id = config['channel_id']
+
     job = context.job
     data = job.data
     title = data['title']
@@ -301,7 +327,7 @@ async def send_event(context: ContextTypes.DEFAULT_TYPE) -> None:
     save_data(context)
 
     try:
-        message = await context.bot.send_message(chat_id=CHANNEL_ID, text=f'*Evento: {title}*\nID: {event_id}', parse_mode='Markdown')
+        message = await context.bot.send_message(chat_id=channel_id, text=f'*Evento: {title}*\nID: {event_id}', parse_mode='Markdown')
         events[event_id]['title_message_id'] = message.message_id
         save_data(context)
     except Exception as e:
@@ -375,6 +401,9 @@ async def _process_next_product(query, event_id: str, current_idx: int, context:
             logging.error(f"Error sending control to creator: {e}")
 
 async def _process_reserve_product(query, event_id: str, idx: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config = get_config(context)
+    channel_id = config['channel_id']
+
     user_id = query.from_user.id
     events = context.bot_data.get('events', {})
     
@@ -401,7 +430,7 @@ async def _process_reserve_product(query, event_id: str, idx: int, context: Cont
         last_msg_id = item['message_ids'][-1]
         try:
             await context.bot.edit_message_reply_markup(
-                chat_id=CHANNEL_ID,
+                chat_id=channel_id,
                 message_id=last_msg_id,
                 reply_markup=None
             )
@@ -466,14 +495,18 @@ async def receive_event_id_resumen(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 async def fin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    config = get_config(context)
     user_id = update.effective_user.id
-    if user_id not in AUTHORIZED_USERS:
+    if user_id not in config.get('authorized_users', []):
         await update.message.reply_text('No tienes permisos para finalizar eventos.')
         return ConversationHandler.END
     await update.message.reply_text('Envíame el identificador único del evento para finalizarlo y obtener el consolidado.')
     return State.WAITING_FOR_EVENT_ID_FIN
 
 async def receive_event_id_fin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    config = get_config(context)
+    channel_id = config['channel_id']
+
     event_id = update.message.text.strip()
     events = context.bot_data.get('events', {})
     if event_id not in events:
@@ -494,7 +527,7 @@ async def receive_event_id_fin(update: Update, context: ContextTypes.DEFAULT_TYP
             if item.get('message_ids'):
                 last_msg_id = item['message_ids'][-1]
                 try:
-                    await context.bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=last_msg_id, reply_markup=None)
+                    await context.bot.edit_message_reply_markup(chat_id=channel_id, message_id=last_msg_id, reply_markup=None)
                 except Exception as e:
                     logging.error(f"Error removing button for {item['caption']}: {e}")
 
@@ -505,8 +538,9 @@ async def receive_event_id_fin(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 async def consolidado_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    config = get_config(context)
     user_id = update.effective_user.id
-    if user_id not in AUTHORIZED_USERS:
+    if user_id not in config.get('authorized_users', []):
         await update.message.reply_text('No tienes permisos para ver consolidado de eventos.')
         return ConversationHandler.END
     await update.message.reply_text('Envíame el identificador único del evento para obtener el consolidado.')
@@ -527,8 +561,9 @@ async def receive_event_id_consolidado(update: Update, context: ContextTypes.DEF
     return ConversationHandler.END
 
 async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config = get_config(context)
     user_id = update.effective_user.id
-    if user_id not in AUTHORIZED_USERS:
+    if user_id not in config.get('authorized_users', []):
         await update.message.reply_text('No tienes permisos para ver el historial de eventos.')
         return
 
@@ -548,14 +583,18 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(historial_text, parse_mode='Markdown')
 
 async def limpiar_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    config = get_config(context)
     user_id = update.effective_user.id
-    if user_id not in AUTHORIZED_USERS:
+    if user_id not in config.get('authorized_users', []):
         await update.message.reply_text('No tienes permisos para limpiar eventos.')
         return ConversationHandler.END
     await update.message.reply_text('Envíame el identificador único del evento para limpiar todos sus mensajes en el canal.')
     return State.WAITING_FOR_EVENT_ID_LIMPIAR
 
 async def receive_event_id_limpiar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    config = get_config(context)
+    channel_id = config['channel_id']
+
     event_id = update.message.text.strip()
     events = context.bot_data.get('events', {})
     if event_id not in events:
@@ -566,7 +605,7 @@ async def receive_event_id_limpiar(update: Update, context: ContextTypes.DEFAULT
     # Borrar título
     if event.get('title_message_id'):
         try:
-            await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=event['title_message_id'])
+            await context.bot.delete_message(chat_id=channel_id, message_id=event['title_message_id'])
         except Exception as e:
             logging.error(f"Error deleting title: {e}")
 
@@ -578,7 +617,7 @@ async def receive_event_id_limpiar(update: Update, context: ContextTypes.DEFAULT
             
         for msg_id in item.get('message_ids', []):
             try:
-                await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=msg_id)
+                await context.bot.delete_message(chat_id=channel_id, message_id=msg_id)
             except Exception as e:
                 logging.error(f"Error deleting media part of product {item['caption']}: {e}")
 
@@ -594,64 +633,124 @@ async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.send_message(chat_id=update.channel_post.chat_id, text='Hello! I am your Telegram bot in this channel.')
 
 
+# ─── Clase ShopperBot ─────────────────────────────────────────────────────
+
+class ShopperBot:
+    """Instancia de un bot de tienda con su propia configuración.
+    
+    Cada empresa/vendedor tiene su propio ShopperBot con:
+    - Su propio token de bot (de BotFather)
+    - Su propio canal de Telegram
+    - Sus propios usuarios autorizados
+    - Su propio directorio de datos
+    """
+
+    def __init__(self, bot_token, channel_id, authorized_users, store_name, data_dir):
+        self.bot_token = bot_token
+        self.channel_id = channel_id
+        self.authorized_users = authorized_users
+        self.store_name = store_name
+        self.data_dir = data_dir
+        self.data_file = os.path.join(data_dir, 'bot_data.json')
+        self.application = None
+
+    def build(self):
+        """Construye y configura la Application de python-telegram-bot con todos los handlers."""
+        self.application = ApplicationBuilder().token(self.bot_token).build()
+
+        # Guardar config en bot_data para que los handlers la lean
+        self.application.bot_data['config'] = {
+            'channel_id': self.channel_id,
+            'authorized_users': self.authorized_users,
+            'store_name': self.store_name,
+            'data_dir': self.data_dir,
+            'data_file': self.data_file,
+        }
+
+        # Cargar datos persistentes
+        load_data(self.application.bot_data, self.data_dir, self.data_file)
+
+        # Registrar handlers
+        self._register_handlers()
+
+        return self.application
+
+    def _register_handlers(self):
+        app = self.application
+
+        app.add_handler(CommandHandler('start', start))
+
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('evento', event_start)],
+            states={
+                State.WAITING_FOR_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | (filters.TEXT & ~filters.COMMAND), receive_media)],
+                State.WAITING_FOR_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_title)],
+                State.WAITING_FOR_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_datetime)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+        )
+        app.add_handler(conv_handler)
+
+        resumen_handler = ConversationHandler(
+            entry_points=[CommandHandler('resumen', resumen_start)],
+            states={
+                State.WAITING_FOR_EVENT_ID_RESUMEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_resumen)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+        )
+        app.add_handler(resumen_handler)
+
+        fin_handler = ConversationHandler(
+            entry_points=[CommandHandler('fin', fin_start)],
+            states={
+                State.WAITING_FOR_EVENT_ID_FIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_fin)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+        )
+        app.add_handler(fin_handler)
+
+        limpiar_handler = ConversationHandler(
+            entry_points=[CommandHandler('limpiar', limpiar_start)],
+            states={
+                State.WAITING_FOR_EVENT_ID_LIMPIAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_limpiar)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+        )
+        app.add_handler(limpiar_handler)
+
+        consolidado_handler = ConversationHandler(
+            entry_points=[CommandHandler('consolidado', consolidado_start)],
+            states={
+                State.WAITING_FOR_EVENT_ID_CONSOLIDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_consolidado)],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+        )
+        app.add_handler(consolidado_handler)
+
+        app.add_handler(CommandHandler('historial', historial))
+
+        app.add_handler(CallbackQueryHandler(handle_mio_query, pattern=r'^(mio|next)\|'))
+        app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.TEXT, handle_channel_message))
+
+
+# ─── Ejecución standalone (compatibilidad hacia atrás) ────────────────────
 
 if __name__ == '__main__':
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Cargar datos persistentes
-    load_data(application.bot_data)
-    
-    application.add_handler(CommandHandler('start', start))
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('evento', event_start)],
-        states={
-            State.WAITING_FOR_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | (filters.TEXT & ~filters.COMMAND), receive_media)],
-            State.WAITING_FOR_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_title)],
-            State.WAITING_FOR_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_datetime)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
+    bot_token = os.getenv('BOT_TOKEN')
+    if not bot_token:
+        raise RuntimeError('BOT_TOKEN no está definido en .env')
+
+    channel_id = os.getenv('CHANNEL_ID', '@000000000')
+    authorized_users_str = os.getenv('AUTHORIZED_USERS', '')
+    authorized_users = [int(uid.strip()) for uid in authorized_users_str.split(',') if uid.strip()]
+    store_name = os.getenv('STORE_NAME', 'MIO')
+
+    bot = ShopperBot(
+        bot_token=bot_token,
+        channel_id=channel_id,
+        authorized_users=authorized_users,
+        store_name=store_name,
+        data_dir='data',
     )
-    application.add_handler(conv_handler)
-    
-    resumen_handler = ConversationHandler(
-        entry_points=[CommandHandler('resumen', resumen_start)],
-        states={
-            State.WAITING_FOR_EVENT_ID_RESUMEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_resumen)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    application.add_handler(resumen_handler)
-    
-    fin_handler = ConversationHandler(
-        entry_points=[CommandHandler('fin', fin_start)],
-        states={
-            State.WAITING_FOR_EVENT_ID_FIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_fin)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    application.add_handler(fin_handler)
-    
-    limpiar_handler = ConversationHandler(
-        entry_points=[CommandHandler('limpiar', limpiar_start)],
-        states={
-            State.WAITING_FOR_EVENT_ID_LIMPIAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_limpiar)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    application.add_handler(limpiar_handler)
-    
-    consolidado_handler = ConversationHandler(
-        entry_points=[CommandHandler('consolidado', consolidado_start)],
-        states={
-            State.WAITING_FOR_EVENT_ID_CONSOLIDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_consolidado)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    application.add_handler(consolidado_handler)
-    
-    application.add_handler(CommandHandler('historial', historial))
-    
-    application.add_handler(CallbackQueryHandler(handle_mio_query, pattern=r'^(mio|next)\|'))
-    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.TEXT, handle_channel_message))
-    application.run_polling(allowed_updates=['message', 'channel_post', 'callback_query'], drop_pending_updates=True)
+    app = bot.build()
+    app.run_polling(allowed_updates=['message', 'channel_post', 'callback_query'], drop_pending_updates=True)

@@ -1,3 +1,9 @@
-.env
 .bot_data.json
 data/
+.env
+__pycache__/
+*.pyc
+.idea/
+.venv/
+reporte_pruebas.txt
+scratch/
