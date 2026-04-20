@@ -232,33 +232,66 @@ async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return State.WAITING_FOR_DATETIME
 
 async def receive_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
     try:
-        event_datetime = datetime.strptime(update.message.text, '%d/%m/%Y %H:%M')
-        now = datetime.now()
-        if event_datetime <= now:
-            await update.message.reply_text('La fecha debe ser en el futuro. Intenta de nuevo.')
-            return State.WAITING_FOR_DATETIME
-        context.user_data['event_datetime'] = event_datetime
-        
+        event_datetime = datetime.strptime(text, '%d/%m/%Y %H:%M')
+    except ValueError:
+        await update.message.reply_text('Formato inválido. Usa DD/MM/YYYY HH:MM (ej. 15/04/2026 14:30).')
+        return State.WAITING_FOR_DATETIME
+
+    now = datetime.now()
+    if event_datetime <= now:
+        await update.message.reply_text('La fecha debe ser en el futuro. Intenta de nuevo.')
+        return State.WAITING_FOR_DATETIME
+
+    try:
         while True:
             event_id = str(random.randint(1000, 9999))
             if event_id not in context.bot_data.get('events', {}):
                 break
-                
+
         event_data = {
             'title': context.user_data['title'],
             'items': [item.copy() for item in context.user_data['items']],
             'event_id': event_id,
             'creator': update.effective_user.id,
-            'event_datetime': update.message.text,
+            'event_datetime': text,
         }
+
+        # Guardar evento inmediatamente en bot_data para persistencia
+        events = context.bot_data.setdefault('events', {})
+        items_for_db = [{'caption': item['caption'], 'media': item.get('media', []), 'clicks': [], 'message_ids': []} for item in context.user_data['items']]
+        events[event_id] = {
+            'title': context.user_data['title'],
+            'creator': update.effective_user.id,
+            'event_datetime': text,
+            'items': items_for_db,
+            'title_message_id': None,
+            'programado': True,
+        }
+        save_data(context)
+
+        # Programar el envío al canal
         delay = (event_datetime - datetime.now()).total_seconds()
-        context.job_queue.run_once(send_event, delay, data=event_data)
-        await update.message.reply_text(f'Evento programado. Se enviará al canal en la fecha indicada. ID del evento: *{event_id}*', parse_mode='Markdown')
+        try:
+            context.job_queue.run_once(send_event, delay, data=event_data)
+        except Exception as e:
+            logging.error(f"Error al programar el job del evento {event_id}: {e}")
+
+        await update.message.reply_text(
+            f'✅ *Evento creado exitosamente!*\n\n'
+            f'📋 *Título:* {context.user_data["title"]}\n'
+            f'📅 *Fecha:* {text}\n'
+            f'🆔 *ID:* {event_id}\n'
+            f'📦 *Productos:* {len(context.user_data["items"])}\n\n'
+            f'El evento se enviará automáticamente al canal en la fecha indicada.',
+            parse_mode='Markdown'
+        )
         return ConversationHandler.END
-    except ValueError:
-        await update.message.reply_text('Formato inválido. Usa DD/MM/YYYY HH:MM.')
-        return State.WAITING_FOR_DATETIME
+    except Exception as e:
+        logging.error(f"Error inesperado al crear evento: {e}")
+        await update.message.reply_text(f'❌ Error al crear el evento: {e}')
+        return ConversationHandler.END
 
 
 async def _send_product_to_channel(context: ContextTypes.DEFAULT_TYPE, item: dict, event_id: str, idx: int, total_items: int) -> bool:
@@ -317,13 +350,17 @@ async def send_event(context: ContextTypes.DEFAULT_TYPE) -> None:
     creator = data['creator']
 
     events = context.bot_data.setdefault('events', {})
-    events[event_id] = {
-        'title': title,
-        'creator': creator,
-        'event_datetime': data.get('event_datetime', ''),
-        'items': [{'caption': item['caption'], 'media': item.get('media', [{'type': 'photo', 'file_id': item.get('photo')}]), 'clicks': [], 'message_ids': []} for item in items],
-        'title_message_id': None
-    }
+    if event_id not in events:
+        # Evento no existía (caso legacy o datos perdidos), crearlo
+        events[event_id] = {
+            'title': title,
+            'creator': creator,
+            'event_datetime': data.get('event_datetime', ''),
+            'items': [{'caption': item['caption'], 'media': item.get('media', [{'type': 'photo', 'file_id': item.get('photo')}]), 'clicks': [], 'message_ids': []} for item in items],
+            'title_message_id': None
+        }
+    # Marcar como ya enviado
+    events[event_id].pop('programado', None)
     save_data(context)
 
     try:
