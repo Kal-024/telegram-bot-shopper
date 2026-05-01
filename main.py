@@ -717,52 +717,33 @@ class ShopperBot:
 
         app.add_handler(CommandHandler('start', start))
 
-        conv_handler = ConversationHandler(
-            entry_points=[CommandHandler('evento', event_start)],
+        # Unificar todos los flujos en un solo ConversationHandler para evitar
+        # que comandos se bloqueen si el usuario deja una conversación a medias.
+        main_conv_handler = ConversationHandler(
+            entry_points=[
+                CommandHandler('evento', event_start),
+                CommandHandler('resumen', resumen_start),
+                CommandHandler('fin', fin_start),
+                CommandHandler('limpiar', limpiar_start),
+                CommandHandler('consolidado', consolidado_start),
+            ],
             states={
                 State.WAITING_FOR_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | (filters.TEXT & ~filters.COMMAND), receive_media)],
                 State.WAITING_FOR_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_title)],
                 State.WAITING_FOR_DATETIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_datetime)],
-            },
-            fallbacks=[CommandHandler('cancel', cancel)],
-        )
-        app.add_handler(conv_handler)
-
-        resumen_handler = ConversationHandler(
-            entry_points=[CommandHandler('resumen', resumen_start)],
-            states={
                 State.WAITING_FOR_EVENT_ID_RESUMEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_resumen)],
-            },
-            fallbacks=[CommandHandler('cancel', cancel)],
-        )
-        app.add_handler(resumen_handler)
-
-        fin_handler = ConversationHandler(
-            entry_points=[CommandHandler('fin', fin_start)],
-            states={
                 State.WAITING_FOR_EVENT_ID_FIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_fin)],
-            },
-            fallbacks=[CommandHandler('cancel', cancel)],
-        )
-        app.add_handler(fin_handler)
-
-        limpiar_handler = ConversationHandler(
-            entry_points=[CommandHandler('limpiar', limpiar_start)],
-            states={
                 State.WAITING_FOR_EVENT_ID_LIMPIAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_limpiar)],
-            },
-            fallbacks=[CommandHandler('cancel', cancel)],
-        )
-        app.add_handler(limpiar_handler)
-
-        consolidado_handler = ConversationHandler(
-            entry_points=[CommandHandler('consolidado', consolidado_start)],
-            states={
                 State.WAITING_FOR_EVENT_ID_CONSOLIDADO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_event_id_consolidado)],
             },
-            fallbacks=[CommandHandler('cancel', cancel)],
+            fallbacks=[
+                CommandHandler('cancel', cancel),
+                # Capturar cualquier otro comando que no sea entry point para avisar o cancelar suavemente
+                MessageHandler(filters.COMMAND, cancel)
+            ],
+            allow_reentry=True
         )
-        app.add_handler(consolidado_handler)
+        app.add_handler(main_conv_handler)
 
         app.add_handler(CommandHandler('historial', historial))
 
