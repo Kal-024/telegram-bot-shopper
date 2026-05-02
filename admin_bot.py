@@ -17,6 +17,7 @@ import json
 import os
 import re
 import logging
+from database import get_db
 
 
 # ─── Configuración ────────────────────────────────────────────────────────
@@ -38,7 +39,18 @@ class AdminState(IntEnum):
 # ─── Funciones de registro ────────────────────────────────────────────────
 
 def load_registry():
-    """Carga el registro de empresas desde disco."""
+    """Carga el registro de empresas desde disco o MongoDB."""
+    db = get_db()
+    if db is not None:
+        try:
+            doc = db.registry.find_one({"_id": "main_registry"})
+            if doc:
+                doc.pop('_id', None)
+                return doc
+            return {'empresas': {}}
+        except Exception as e:
+            logging.error(f'Error cargando registro de MongoDB: {e}')
+
     if os.path.exists(REGISTRY_FILE):
         try:
             with open(REGISTRY_FILE, 'r', encoding='utf-8') as f:
@@ -49,7 +61,15 @@ def load_registry():
 
 
 def save_registry(registry):
-    """Guarda el registro de empresas a disco."""
+    """Guarda el registro de empresas a disco o MongoDB."""
+    db = get_db()
+    if db is not None:
+        try:
+            db.registry.replace_one({"_id": "main_registry"}, registry, upsert=True)
+            return
+        except Exception as e:
+            logging.error(f'Error guardando registro en MongoDB: {e}')
+
     os.makedirs(REGISTRY_DIR, exist_ok=True)
     try:
         with open(REGISTRY_FILE, 'w', encoding='utf-8') as f:

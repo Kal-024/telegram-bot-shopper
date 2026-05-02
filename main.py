@@ -8,6 +8,7 @@ import logging
 import random
 from dotenv import load_dotenv
 from enum import IntEnum
+from database import get_db
 
 load_dotenv()
 
@@ -53,20 +54,42 @@ def get_welcome_message(username, bot_name, is_authorized, store_name):
 
 # ─── Persistencia ─────────────────────────────────────────────────────────
 
-def load_data(bot_data, data_dir, data_file, legacy_file=None):
-    """Carga datos persistentes desde disco.
+def load_data(bot_data, empresa_id, data_dir, data_file, legacy_file=None):
+    """Carga datos persistentes desde MongoDB o disco.
 
     Args:
         bot_data: Diccionario de bot_data de la Application.
-        data_dir: Directorio donde viven los datos de esta empresa.
-        data_file: Ruta completa al archivo JSON de datos.
-        legacy_file: Ruta opcional a un archivo legacy (.bot_data.json) para migración.
+        empresa_id: ID de la empresa (ej. tienda_0001).
+        data_dir: Directorio donde viven los datos de esta empresa (fallback).
+        data_file: Ruta completa al archivo JSON de datos (fallback).
+        legacy_file: Ruta opcional a un archivo legacy para migración (fallback).
     """
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
     # Preservar config si ya fue seteada (para que bot_data.update no la borre)
     config_backup = bot_data.get('config')
+
+    # Intentar cargar desde MongoDB primero
+    db = get_db()
+    if db is not None:
+        try:
+            doc = db.bot_data.find_one({"_id": empresa_id})
+            if doc:
+                doc.pop('_id', None)
+                if 'events' not in bot_data:
+                    bot_data['events'] = {}
+                if 'events' in doc:
+                    bot_data['events'].update(doc['events'])
+                for k, v in doc.items():
+                    if k != 'events':
+                        bot_data[k] = v
+                if config_backup:
+                    bot_data['config'] = config_backup
+                return
+        except Exception as e:
+            logging.error(f'Error cargando datos de MongoDB para {empresa_id}: {e}')
+            # Cae al fallback JSON si MongoDB falla
 
     if legacy_file and os.path.exists(legacy_file) and os.path.getsize(legacy_file) > 0:
         try:
@@ -99,15 +122,29 @@ def load_data(bot_data, data_dir, data_file, legacy_file=None):
 
 
 def save_data(context):
-    """Guarda datos persistentes a disco, leyendo la ruta desde la config."""
+    """Guarda datos persistentes a MongoDB o disco."""
     config = get_config(context)
+    empresa_id = config.get('empresa_id')
     data_dir = config.get('data_dir', 'data')
     data_file = config.get('data_file', os.path.join(data_dir, 'bot_data.json'))
+    
+    # Filtrar 'config' para no guardarlo
+    data_to_save = {k: v for k, v in context.bot_data.items() if k != 'config'}
+    
+    # Intentar guardar en MongoDB
+    db = get_db()
+    if db is not None and empresa_id:
+        try:
+            db.bot_data.replace_one({"_id": empresa_id}, data_to_save, upsert=True)
+            return
+        except Exception as e:
+            logging.error(f'Error guardando datos en MongoDB para {empresa_id}: {e}')
+            # Cae al fallback JSON si falla MongoDB
+
+    # Fallback JSON
     try:
         if not os.path.exists(data_dir):
             os.makedirs(data_dir)
-        # Filtrar 'config' para no guardarlo en el JSON de datos
-        data_to_save = {k: v for k, v in context.bot_data.items() if k != 'config'}
         with open(data_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     except IOError as e:
@@ -705,7 +742,7 @@ class ShopperBot:
         }
 
         # Cargar datos persistentes
-        load_data(self.application.bot_data, self.data_dir, self.data_file)
+        load_data(self.application.bot_data, self.empresa_id, self.data_dir, self.data_file)
 
         # Registrar handlers
         self._register_handlers()

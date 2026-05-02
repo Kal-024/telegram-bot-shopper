@@ -1,3 +1,4 @@
 # Force rebuild
 python-telegram-bot[job-queue]==22.7
 python-dotenv==1.2.2
+pymongo==4.7.0
