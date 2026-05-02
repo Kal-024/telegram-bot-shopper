@@ -90,15 +90,15 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     await update.message.reply_text(
-        '*🛠 Panel de Administración - Bot Maestro*\n\n'
+        '<b>🛠 Panel de Administración - Bot Maestro</b>\n\n'
         'Comandos disponibles:\n\n'
         '• /registrar - Registrar una nueva empresa/tienda\n'
         '• /listar - Ver todas las empresas registradas\n'
         '• /estado - Ver estado de los bots activos\n'
-        '• /detener <id> - Desactivar el bot de una empresa\n'
-        '• /reanudar <id> - Reactivar el bot de una empresa\n'
-        '• /eliminar <id> - Eliminar una empresa del sistema\n',
-        parse_mode='Markdown'
+        '• /detener &lt;id&gt; - Desactivar el bot de una empresa\n'
+        '• /reanudar &lt;id&gt; - Reactivar el bot de una empresa\n'
+        '• /eliminar &lt;id&gt; - Eliminar una empresa del sistema\n',
+        parse_mode='HTML'
     )
 
 
@@ -111,10 +111,10 @@ async def registrar_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
     await update.message.reply_text(
-        '*📝 Registro de nueva empresa*\n\n'
-        'Paso 1/4: Envíame el *token del bot* que creaste en @BotFather para esta tienda.\n\n'
-        '_Ejemplo: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz_',
-        parse_mode='Markdown'
+        '<b>📝 Registro de nueva empresa</b>\n\n'
+        'Paso 1/4: Envíame el <b>token del bot</b> que creaste en @BotFather para esta tienda.\n\n'
+        '<i>Ejemplo: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz</i>',
+        parse_mode='HTML'
     )
     # Limpiar datos temporales
     context.user_data['new_empresa'] = {}
@@ -128,9 +128,9 @@ async def receive_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if not re.match(r'^\d+:[A-Za-z0-9_-]+$', token):
         await update.message.reply_text(
             '❌ Formato de token inválido.\n'
-            'El token debe tener el formato: `número:letras`\n'
+            'El token debe tener el formato: <code>número:letras</code>\n'
             'Intenta de nuevo o envía /cancel para cancelar.',
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
         return AdminState.WAITING_TOKEN
 
@@ -138,18 +138,19 @@ async def receive_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     registry = load_registry()
     for emp_id, emp_data in registry.get('empresas', {}).items():
         if emp_data.get('bot_token') == token:
+            import html
             await update.message.reply_text(
-                f'⚠️ Este token ya está registrado como *{emp_data["store_name"]}* (ID: `{emp_id}`).\n'
+                f'⚠️ Este token ya está registrado como <b>{html.escape(emp_data["store_name"])}</b> (ID: <code>{emp_id}</code>).\n'
                 'Envía otro token o /cancel para cancelar.',
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             return AdminState.WAITING_TOKEN
 
     context.user_data['new_empresa']['bot_token'] = token
     await update.message.reply_text(
-        'Paso 2/4: Envíame el *ID del canal* donde este bot publicará eventos.\n\n'
-        '_Puede ser @nombreDelCanal o un ID numérico negativo (ej: -1001234567890)_',
-        parse_mode='Markdown'
+        'Paso 2/4: Envíame el <b>ID del canal</b> donde este bot publicará eventos.\n\n'
+        '<i>Puede ser @nombreDelCanal o un ID numérico negativo (ej: -1001234567890)</i>',
+        parse_mode='HTML'
     )
     return AdminState.WAITING_CHANNEL
 
@@ -161,16 +162,16 @@ async def receive_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not (channel.startswith('@') or channel.startswith('-')):
         await update.message.reply_text(
             '❌ Formato inválido. Debe comenzar con @ o ser un ID numérico negativo.\n'
-            '_Ejemplo: @micanal o -1001234567890_',
-            parse_mode='Markdown'
+            '<i>Ejemplo: @micanal o -1001234567890</i>',
+            parse_mode='HTML'
         )
         return AdminState.WAITING_CHANNEL
 
     context.user_data['new_empresa']['channel_id'] = channel
     await update.message.reply_text(
-        'Paso 3/4: Envíame el *nombre de la tienda*.\n\n'
-        '_Ejemplo: Fashion Store, Zapatos HN, Mi Tienda_',
-        parse_mode='Markdown'
+        'Paso 3/4: Envíame el <b>nombre de la tienda</b>.\n\n'
+        '<i>Ejemplo: Fashion Store, Zapatos HN, Mi Tienda</i>',
+        parse_mode='HTML'
     )
     return AdminState.WAITING_STORE_NAME
 
@@ -184,10 +185,10 @@ async def receive_store_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data['new_empresa']['store_name'] = store_name
     await update.message.reply_text(
-        'Paso 4/4: Envíame los *IDs de los usuarios autorizados* (vendedores/admins) para esta tienda.\n\n'
-        '_Separados por coma. Ejemplo: 123456789, 987654321_\n'
-        '_Puedes usar @userinfobot en Telegram para obtener IDs._',
-        parse_mode='Markdown'
+        'Paso 4/4: Envíame los <b>IDs de los usuarios autorizados</b> (vendedores/admins) para esta tienda.\n\n'
+        '<i>Separados por coma. Ejemplo: 123456789, 987654321</i>\n'
+        '<i>Puedes usar @userinfobot en Telegram para obtener IDs.</i>',
+        parse_mode='HTML'
     )
     return AdminState.WAITING_USERS
 
@@ -202,8 +203,8 @@ async def receive_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     except ValueError:
         await update.message.reply_text(
             '❌ Formato inválido. Envía IDs numéricos separados por coma.\n'
-            '_Ejemplo: 123456789, 987654321_',
-            parse_mode='Markdown'
+            '<i>Ejemplo: 123456789, 987654321</i>',
+            parse_mode='HTML'
         )
         return AdminState.WAITING_USERS
 
@@ -213,15 +214,16 @@ async def receive_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     emp = context.user_data['new_empresa']
     token_masked = emp['bot_token'][:8] + '...' + emp['bot_token'][-6:]
 
+    import html
     summary = (
-        '*📋 Resumen de la nueva empresa:*\n\n'
-        f'🏪 *Tienda:* {emp["store_name"]}\n'
-        f'🤖 *Token:* `{token_masked}`\n'
-        f'📢 *Canal:* {emp["channel_id"]}\n'
-        f'👥 *Usuarios autorizados:* {", ".join(str(u) for u in emp["authorized_users"])}\n\n'
-        '¿Confirmar registro? Escribe *sí* o *no*.'
+        '<b>📋 Resumen de la nueva empresa:</b>\n\n'
+        f'🏪 <b>Tienda:</b> {html.escape(emp["store_name"])}\n'
+        f'🤖 <b>Token:</b> <code>{token_masked}</code>\n'
+        f'📢 <b>Canal:</b> {html.escape(emp["channel_id"])}\n'
+        f'👥 <b>Usuarios autorizados:</b> {", ".join(str(u) for u in emp["authorized_users"])}\n\n'
+        '¿Confirmar registro? Escribe <b>sí</b> o <b>no</b>.'
     )
-    await update.message.reply_text(summary, parse_mode='Markdown')
+    await update.message.reply_text(summary, parse_mode='HTML')
     return AdminState.WAITING_CONFIRM
 
 
@@ -247,12 +249,13 @@ async def receive_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         }
         save_registry(registry)
 
+        import html
         await update.message.reply_text(
-            f'✅ *Empresa registrada exitosamente!*\n\n'
-            f'🔑 *ID:* `{empresa_id}`\n'
-            f'🏪 *Tienda:* {emp["store_name"]}\n\n'
-            f'⚠️ *Reinicia el servidor* (deployment) para que el nuevo bot comience a funcionar.',
-            parse_mode='Markdown'
+            f'✅ <b>Empresa registrada exitosamente!</b>\n\n'
+            f'🔑 <b>ID:</b> <code>{empresa_id}</code>\n'
+            f'🏪 <b>Tienda:</b> {html.escape(emp["store_name"])}\n\n'
+            f'⚠️ <b>Reinicia el servidor</b> (deployment) para que el nuevo bot comience a funcionar.',
+            parse_mode='HTML'
         )
         context.user_data.pop('new_empresa', None)
         return ConversationHandler.END
@@ -263,7 +266,7 @@ async def receive_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
     else:
-        await update.message.reply_text('Escribe *sí* o *no*.', parse_mode='Markdown')
+        await update.message.reply_text('Escribe <b>sí</b> o <b>no</b>.', parse_mode='HTML')
         return AdminState.WAITING_CONFIRM
 
 
@@ -281,17 +284,18 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text('No hay empresas registradas. Usa /registrar para agregar una.')
         return
 
-    text = '*📋 Empresas registradas:*\n\n'
+    import html
+    text = '<b>📋 Empresas registradas:</b>\n\n'
     for emp_id, data in empresas.items():
         estado = '🟢 Activo' if data.get('activo', False) else '🔴 Detenido'
         text += (
-            f'*{emp_id}* — {data["store_name"]}\n'
-            f'   Canal: {data["channel_id"]}\n'
+            f'<b>{emp_id}</b> — {html.escape(data["store_name"])}\n'
+            f'   Canal: {html.escape(data["channel_id"])}\n'
             f'   Estado: {estado}\n'
             f'   Usuarios: {", ".join(str(u) for u in data.get("authorized_users", []))}\n'
             f'   Registrado: {data.get("fecha_registro", "N/A")}\n\n'
         )
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 
 async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -309,8 +313,9 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     activas = sum(1 for e in empresas.values() if e.get('activo', False))
     detenidas = len(empresas) - activas
 
+    import html
     text = (
-        '*📊 Estado del sistema:*\n\n'
+        '<b>📊 Estado del sistema:</b>\n\n'
         f'Total de empresas: {len(empresas)}\n'
         f'🟢 Activas: {activas}\n'
         f'🔴 Detenidas: {detenidas}\n\n'
@@ -318,9 +323,9 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     for emp_id, data in empresas.items():
         icono = '🟢' if data.get('activo', False) else '🔴'
-        text += f'{icono} `{emp_id}` — {data["store_name"]}\n'
+        text += f'{icono} <code>{emp_id}</code> — {html.escape(data["store_name"])}\n'
 
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 
 async def detener(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -330,23 +335,24 @@ async def detener(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     args = context.args
     if not args:
-        await update.message.reply_text('Uso: /detener <empresa_id>\n_Ejemplo: /detener tienda_0001_', parse_mode='Markdown')
+        await update.message.reply_text('Uso: /detener &lt;empresa_id&gt;\n<i>Ejemplo: /detener tienda_0001</i>', parse_mode='HTML')
         return
 
     empresa_id = args[0]
     registry = load_registry()
 
     if empresa_id not in registry.get('empresas', {}):
-        await update.message.reply_text(f'❌ Empresa `{empresa_id}` no encontrada.', parse_mode='Markdown')
+        await update.message.reply_text(f'❌ Empresa <code>{empresa_id}</code> no encontrada.', parse_mode='HTML')
         return
 
     registry['empresas'][empresa_id]['activo'] = False
     save_registry(registry)
 
+    import html
     await update.message.reply_text(
-        f'🔴 Empresa `{empresa_id}` ({registry["empresas"][empresa_id]["store_name"]}) marcada como *detenida*.\n'
+        f'🔴 Empresa <code>{empresa_id}</code> ({html.escape(registry["empresas"][empresa_id]["store_name"])}) marcada como <b>detenida</b>.\n'
         f'Reinicia el servidor para aplicar los cambios.',
-        parse_mode='Markdown'
+        parse_mode='HTML'
     )
 
 
@@ -357,23 +363,24 @@ async def reanudar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     args = context.args
     if not args:
-        await update.message.reply_text('Uso: /reanudar <empresa_id>\n_Ejemplo: /reanudar tienda_0001_', parse_mode='Markdown')
+        await update.message.reply_text('Uso: /reanudar &lt;empresa_id&gt;\n<i>Ejemplo: /reanudar tienda_0001</i>', parse_mode='HTML')
         return
 
     empresa_id = args[0]
     registry = load_registry()
 
     if empresa_id not in registry.get('empresas', {}):
-        await update.message.reply_text(f'❌ Empresa `{empresa_id}` no encontrada.', parse_mode='Markdown')
+        await update.message.reply_text(f'❌ Empresa <code>{empresa_id}</code> no encontrada.', parse_mode='HTML')
         return
 
     registry['empresas'][empresa_id]['activo'] = True
     save_registry(registry)
 
+    import html
     await update.message.reply_text(
-        f'🟢 Empresa `{empresa_id}` ({registry["empresas"][empresa_id]["store_name"]}) marcada como *activa*.\n'
+        f'🟢 Empresa <code>{empresa_id}</code> ({html.escape(registry["empresas"][empresa_id]["store_name"])}) marcada como <b>activa</b>.\n'
         f'Reinicia el servidor para aplicar los cambios.',
-        parse_mode='Markdown'
+        parse_mode='HTML'
     )
 
 
@@ -384,25 +391,26 @@ async def eliminar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     args = context.args
     if not args:
-        await update.message.reply_text('Uso: /eliminar <empresa_id>\n_Ejemplo: /eliminar tienda_0001_', parse_mode='Markdown')
+        await update.message.reply_text('Uso: /eliminar &lt;empresa_id&gt;\n<i>Ejemplo: /eliminar tienda_0001</i>', parse_mode='HTML')
         return
 
     empresa_id = args[0]
     registry = load_registry()
 
     if empresa_id not in registry.get('empresas', {}):
-        await update.message.reply_text(f'❌ Empresa `{empresa_id}` no encontrada.', parse_mode='Markdown')
+        await update.message.reply_text(f'❌ Empresa <code>{empresa_id}</code> no encontrada.', parse_mode='HTML')
         return
 
     empresa_name = registry['empresas'][empresa_id]['store_name']
     del registry['empresas'][empresa_id]
     save_registry(registry)
 
+    import html
     await update.message.reply_text(
-        f'🗑 Empresa `{empresa_id}` (*{empresa_name}*) eliminada del registro.\n'
-        f'⚠️ Los datos de la empresa en `data/{empresa_id}/` NO se han borrado por seguridad.\n'
+        f'🗑 Empresa <code>{empresa_id}</code> (<b>{html.escape(empresa_name)}</b>) eliminada del registro.\n'
+        f'⚠️ Los datos de la empresa en <code>data/{empresa_id}/</code> NO se han borrado por seguridad.\n'
         f'Reinicia el servidor para aplicar los cambios.',
-        parse_mode='Markdown'
+        parse_mode='HTML'
     )
 
 
