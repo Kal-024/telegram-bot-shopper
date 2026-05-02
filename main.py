@@ -732,8 +732,12 @@ class ShopperBot:
         """Construye y configura la Application de python-telegram-bot con todos los handlers."""
         self.application = ApplicationBuilder().token(self.bot_token).build()
 
+        # Extraer empresa_id a partir del data_dir (ej. data/tienda_0001 -> tienda_0001)
+        empresa_id = os.path.basename(self.data_dir)
+
         # Guardar config en bot_data para que los handlers la lean
         self.application.bot_data['config'] = {
+            'empresa_id': empresa_id,
             'channel_id': self.channel_id,
             'authorized_users': self.authorized_users,
             'store_name': self.store_name,
@@ -742,7 +746,7 @@ class ShopperBot:
         }
 
         # Cargar datos persistentes
-        load_data(self.application.bot_data, self.empresa_id, self.data_dir, self.data_file)
+        load_data(self.application.bot_data, empresa_id, self.data_dir, self.data_file)
 
         # Registrar handlers
         self._register_handlers()
