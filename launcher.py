@@ -40,8 +40,9 @@ def migrate_legacy_data():
     legacy_data = os.path.join('data', 'bot_data.json')
     legacy_root_data = '.bot_data.json'
 
-    # Si ya hay registro, no migrar
-    if os.path.exists(REGISTRY_FILE):
+    # Si ya hay registro (en Mongo o en JSON local), no migrar
+    registry = load_registry()
+    if registry.get('empresas'):
         return
 
     bot_token = os.getenv('BOT_TOKEN')
