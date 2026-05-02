@@ -748,10 +748,57 @@ class ShopperBot:
         # Cargar datos persistentes
         load_data(self.application.bot_data, empresa_id, self.data_dir, self.data_file)
 
+        # Re-programar eventos pendientes que sobrevivieron al reinicio
+        self._reschedule_pending_events()
+
         # Registrar handlers
         self._register_handlers()
 
         return self.application
+
+    def _reschedule_pending_events(self):
+        """Re-programa eventos que estaban marcados como 'programado' tras un reinicio."""
+        events = self.application.bot_data.get('events', {})
+        now = datetime.now()
+        rescheduled = 0
+
+        for event_id, event in events.items():
+            if not event.get('programado'):
+                continue
+
+            event_dt_str = event.get('event_datetime', '')
+            if not event_dt_str:
+                continue
+
+            try:
+                event_datetime = datetime.strptime(event_dt_str, '%d/%m/%Y %H:%M')
+            except ValueError:
+                logging.warning(f'Evento {event_id}: fecha inválida "{event_dt_str}", ignorando re-programación.')
+                continue
+
+            # Construir los datos que send_event espera
+            event_data = {
+                'title': event.get('title', ''),
+                'items': event.get('items', []),
+                'event_id': event_id,
+                'creator': event.get('creator'),
+                'event_datetime': event_dt_str,
+            }
+
+            delay = (event_datetime - now).total_seconds()
+            if delay < 0:
+                # El evento ya debió haberse enviado pero se perdió por el reinicio.
+                # Enviarlo en 5 segundos para dar tiempo a que la app arranque.
+                delay = 5
+                logging.info(f'⏰ Evento {event_id} ("{event["title"]}") ya pasó su hora. Enviándolo en 5s.')
+            else:
+                logging.info(f'⏰ Re-programando evento {event_id} ("{event["title"]}") para {event_dt_str} (en {delay:.0f}s).')
+
+            self.application.job_queue.run_once(send_event, delay, data=event_data)
+            rescheduled += 1
+
+        if rescheduled:
+            logging.info(f'✅ {rescheduled} evento(s) pendiente(s) re-programado(s) tras reinicio.')
 
     def _register_handlers(self):
         app = self.application
