@@ -1,3 +1,4 @@
+import html
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, InputMediaPhoto, InputMediaVideo
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, CallbackQueryHandler
 from datetime import datetime
@@ -171,6 +172,7 @@ def format_user_identifier(user_id, username):
     return f'@{user_id}'
 
 def get_consolidado_text(event: dict) -> str:
+    import html
     user_reservations = {}
     for item in event.get('items', []):
         for click in item.get('clicks', []):
@@ -182,11 +184,12 @@ def get_consolidado_text(event: dict) -> str:
                 }
             user_reservations[uid]['products'].append(item['caption'])
 
-    consolidado = f'*Consolidado del evento "{event.get("title", "")}"*\n\n'
+    consolidado = f'<b>Consolidado del evento "{html.escape(event.get("title", ""))}"</b>\n\n'
     if user_reservations:
         for uid, data in user_reservations.items():
-            user_label = format_user_identifier(uid, data['username'])
-            consolidado += f'{user_label}: {", ".join(data["products"])}\n'
+            user_label = html.escape(format_user_identifier(uid, data['username']))
+            products_escaped = [html.escape(p) for p in data["products"]]
+            consolidado += f'{user_label}: {", ".join(products_escaped)}\n'
     else:
         consolidado += 'No hay reservas.\n'
     return consolidado
@@ -202,7 +205,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bot_name = bot_info.first_name
     is_authorized = user_id in config.get('authorized_users', [])
     welcome_message = get_welcome_message(username, bot_name, is_authorized, config.get('store_name', 'MIO'))
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    await update.message.reply_text(welcome_message, parse_mode='HTML')
 
 
 async def event_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -316,13 +319,13 @@ async def receive_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logging.error(f"Error al programar el job del evento {event_id}: {e}")
 
         await update.message.reply_text(
-            f'✅ *Evento creado exitosamente!*\n\n'
-            f'📋 *Título:* {context.user_data["title"]}\n'
-            f'📅 *Fecha:* {text}\n'
-            f'🆔 *ID:* {event_id}\n'
-            f'📦 *Productos:* {len(context.user_data["items"])}\n\n'
+            f'✅ <b>Evento creado exitosamente!</b>\n\n'
+            f'📋 <b>Título:</b> {html.escape(context.user_data["title"])}\n'
+            f'📅 <b>Fecha:</b> {text}\n'
+            f'🆔 <b>ID:</b> {event_id}\n'
+            f'📦 <b>Productos:</b> {len(context.user_data["items"])}\n\n'
             f'El evento se enviará automáticamente al canal en la fecha indicada.',
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
         return ConversationHandler.END
     except Exception as e:
@@ -348,9 +351,9 @@ async def _send_product_to_channel(context: ContextTypes.DEFAULT_TYPE, item: dic
         if len(media) == 1:
             m = media[0]
             if m['type'] == 'photo':
-                msg = await context.bot.send_photo(chat_id=channel_id, photo=m['file_id'], caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+                msg = await context.bot.send_photo(chat_id=channel_id, photo=m['file_id'], caption=caption, parse_mode='HTML', reply_markup=InlineKeyboardMarkup([channel_buttons]))
             else:
-                msg = await context.bot.send_video(chat_id=channel_id, video=m['file_id'], caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+                msg = await context.bot.send_video(chat_id=channel_id, video=m['file_id'], caption=caption, parse_mode='HTML', reply_markup=InlineKeyboardMarkup([channel_buttons]))
             message_ids.append(msg.message_id)
         else:
             input_media = []
@@ -364,7 +367,7 @@ async def _send_product_to_channel(context: ContextTypes.DEFAULT_TYPE, item: dic
             for gm in msgs:
                 message_ids.append(gm.message_id)
             # Enviar mensaje con botón e información
-            btn_msg = await context.bot.send_message(chat_id=channel_id, text=f"📌 {caption}", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([channel_buttons]))
+            btn_msg = await context.bot.send_message(chat_id=channel_id, text=f"📌 <b>{html.escape(item['caption'])}</b>\n\nPresiona el botón para separar.", parse_mode='HTML', reply_markup=InlineKeyboardMarkup([channel_buttons]))
             message_ids.append(btn_msg.message_id)
             
         item['message_ids'] = message_ids
@@ -401,7 +404,7 @@ async def send_event(context: ContextTypes.DEFAULT_TYPE) -> None:
     save_data(context)
 
     try:
-        message = await context.bot.send_message(chat_id=channel_id, text=f'*Evento: {title}*\nID: {event_id}', parse_mode='Markdown')
+        message = await context.bot.send_message(chat_id=channel_id, text=f'<b>Evento: {html.escape(title)}</b>\nID: {event_id}', parse_mode='HTML')
         events[event_id]['title_message_id'] = message.message_id
         save_data(context)
     except Exception as e:
@@ -422,7 +425,7 @@ async def send_event(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await context.bot.send_message(
                     chat_id=creator,
                     text=f'Control del evento "{title}"\nPróximo producto: *{next_item["caption"]}*\n\nPresiona Siguiente para enviar este producto al canal.',
-                    parse_mode='Markdown',
+                    parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Siguiente', callback_data=f'next|{event_id}|{idx}')]]),
                 )
             except Exception as e:
@@ -468,7 +471,7 @@ async def _process_next_product(query, event_id: str, current_idx: int, context:
             await context.bot.send_message(
                 chat_id=events[event_id]['creator'],
                 text=f'Control del evento "{events[event_id]["title"]}"\nPróximo producto: *{next_item["caption"]}*\n\nPresiona Siguiente para enviar este producto al canal.',
-                parse_mode='Markdown',
+                parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Siguiente', callback_data=f'next|{event_id}|{next_idx}')]]),
             )
         except Exception as e:
@@ -518,7 +521,7 @@ async def _process_reserve_product(query, event_id: str, idx: int, context: Cont
         f'✅ *Reservado para ti!*'
     )
     try:
-        await context.bot.send_message(chat_id=user_id, text=summary, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=user_id, text=summary, parse_mode='HTML')
         await query.answer(text='Producto reservado. Te envié el resumen en privado.', show_alert=False)
     except Exception as e:
         logging.warning(f"No se pudo enviar mensaje final al usuario {user_id}: {e}")
@@ -564,8 +567,8 @@ async def receive_event_id_resumen(update: Update, context: ContextTypes.DEFAULT
     if not user_clicks:
         await update.message.reply_text('No has interactuado con productos en este evento.')
     else:
-        summary = f'*Resumen de tus productos en el evento "{event["title"]}"*\n\n' + '\n'.join(user_clicks)
-        await update.message.reply_text(summary, parse_mode='Markdown')
+        summary = f'<b>Resumen de tus productos en el evento "{html.escape(event["title"])}"</b>\n\n' + html.escape('\n'.join(user_clicks))
+        await update.message.reply_text(summary, parse_mode='HTML')
     return ConversationHandler.END
 
 async def fin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -590,7 +593,7 @@ async def receive_event_id_fin(update: Update, context: ContextTypes.DEFAULT_TYP
     event = events[event_id]
     consolidado = get_consolidado_text(event)
 
-    await update.message.reply_text(consolidado, parse_mode='Markdown')
+    await update.message.reply_text(consolidado, parse_mode='HTML')
 
     # Eliminar botones de productos no reservados
     for item in event['items']:
@@ -630,7 +633,7 @@ async def receive_event_id_consolidado(update: Update, context: ContextTypes.DEF
     event = events[event_id]
     consolidado = get_consolidado_text(event)
 
-    await update.message.reply_text(consolidado, parse_mode='Markdown')
+    await update.message.reply_text(consolidado, parse_mode='HTML')
 
     return ConversationHandler.END
 
@@ -654,7 +657,7 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         date_info = f" - *Fecha/Hora:* {event['event_datetime']}" if event.get('event_datetime') else ""
         historial_text += f'*ID:* {event_id} - *Título:* {event["title"]}{date_info}\n'
 
-    await update.message.reply_text(historial_text, parse_mode='Markdown')
+    await update.message.reply_text(historial_text, parse_mode='HTML')
 
 async def limpiar_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     config = get_config(context)
