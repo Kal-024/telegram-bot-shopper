@@ -651,11 +651,11 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text('No hay eventos finalizados.')
         return
 
-    historial_text = '*Historial de eventos finalizados:*\n\n'
+    historial_text = '<b>Historial de eventos finalizados:</b>\n\n'
     for event_id in finalizados:
         event = events[event_id]
-        date_info = f" - *Fecha/Hora:* {event['event_datetime']}" if event.get('event_datetime') else ""
-        historial_text += f'*ID:* {event_id} - *Título:* {event["title"]}{date_info}\n'
+        date_info = f" - <b>Fecha/Hora:</b> {event['event_datetime']}" if event.get('event_datetime') else ""
+        historial_text += f'<b>ID:</b> {event_id} - <b>Título:</b> {html.escape(event["title"])}{date_info}\n'
 
     await update.message.reply_text(historial_text, parse_mode='HTML')
 
